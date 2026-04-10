@@ -203,13 +203,33 @@ def find_matches(kexp_events: list[dict], spotify_artists: set[str]) -> list[dic
 
 # ── 4. Send email ──────────────────────────────────────────────────────────
 
+def fetch_photo_base64(url: str) -> str:
+    """Download artist photo and return as base64 data URI for inline embedding."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; KexpArtistAlert/1.0)"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        import base64
+        data = base64.b64encode(resp.content).decode("utf-8")
+        ct = resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
+        return f"data:{ct};base64,{data}"
+    except Exception:
+        return ""
+
+
 def build_artist_card(m: dict) -> str:
+    photo_src = ""
     if m.get("photo"):
+        photo_src = fetch_photo_base64(m["photo"])
+
+    if photo_src:
         photo_html = f'''<div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto 18px;background:#e8e8e8;">
-          <img src="{m["photo"]}" width="96" height="96" style="width:100%;height:100%;object-fit:cover;display:block;" alt="{m["artist"]}">
+          <img src="{photo_src}" width="96" height="96" style="width:100%;height:100%;object-fit:cover;display:block;" alt="{m["artist"]}">
         </div>'''
     else:
         photo_html = '<div style="width:96px;height:96px;border-radius:50%;background:#e8e8e8;margin:0 auto 18px;"></div>'
+
+    artist_link = f'<a href="{m["url"]}" style="color:#1a1a1a;text-decoration:none;">{m["artist"]}</a>' if m.get("url") else m["artist"]
 
     event_btn = ""
     if m.get("url"):
@@ -220,7 +240,7 @@ def build_artist_card(m: dict) -> str:
     return f"""
     <div style="padding:32px 24px;border-bottom:1px solid #f0f0f0;text-align:center;">
       {photo_html}
-      <p style="margin:0 0 8px;font-size:22px;font-weight:600;color:#1a1a1a;">{m["artist"]}</p>
+      <p style="margin:0 0 8px;font-size:22px;font-weight:600;color:#1a1a1a;">{artist_link}</p>
       <p style="margin:0 0 6px;font-size:16px;font-weight:500;color:#444;">{m.get("date","")}</p>
       <p style="margin:0 0 24px;font-size:15px;color:#888;">{m.get("details","")}</p>
       {event_btn}{all_btn}
