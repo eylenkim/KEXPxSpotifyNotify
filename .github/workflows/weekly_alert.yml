@@ -1,0 +1,37 @@
+name: KEXP Artist Alert
+
+on:
+  schedule:
+    # Every Monday at 9:00 AM Pacific (UTC-7 in summer, UTC-8 in winter)
+    # Adjust the hour to match your preferred time
+    - cron: "0 16 * * 1"  # 16:00 UTC = 9:00 AM PDT
+
+  # Also lets you trigger it manually from GitHub's Actions tab
+  workflow_dispatch:
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run artist alert
+        env:
+          SPOTIFY_CLIENT_ID:     ${{ secrets.SPOTIFY_CLIENT_ID }}
+          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+          SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
+          GMAIL_ADDRESS:         ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD:    ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL:           ${{ secrets.ALERT_EMAIL }}
+          ANTHROPIC_API_KEY:     ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python artist_alert.py
