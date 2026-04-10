@@ -99,9 +99,12 @@ def get_kexp_events() -> list[dict]:
         photo_url = ""
         for img in h3.find_all_previous("img", limit=5):
             src = img.get("src", "")
-            if "placeholder" not in src and src.startswith("http"):
-                photo_url = src
-                break
+            if not src or "placeholder" in src or "logo" in src or "icon" in src or src.endswith(".svg"):
+                continue
+            if src.startswith("/"):
+                src = "https://www.kexp.org" + src
+            photo_url = src
+            break
 
         details = f"{time_str} · KEXP Studio (Open to the Public)".strip(" ·")
 
