@@ -130,10 +130,10 @@ def get_spotify_artists() -> set[str]:
         for a in tops["items"]:
             artist_names.add(a["name"].lower().strip())
 
-    # Artists from saved tracks (sample — first 20 pages)
-    print("  Sampling saved tracks …")
+    # Artists from ALL saved tracks — full library scan
+    print("  Scanning full liked songs library …")
     offset = 0
-    for _ in range(20):
+    while True:
         tracks = sp.current_user_saved_tracks(limit=50, offset=offset)
         if not tracks["items"]:
             break
@@ -143,6 +143,7 @@ def get_spotify_artists() -> set[str]:
         offset += 50
         if not tracks["next"]:
             break
+        print(f"    … {offset} tracks scanned so far")
 
     print(f"  → {len(artist_names)} unique Spotify artists loaded")
     return artist_names
