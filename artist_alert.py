@@ -36,6 +36,28 @@ TITLE_RE = re.compile(r"^(.+?)\s+LIVE on KEXP", re.IGNORECASE)
 
 # ── 1. Scrape KEXP ─────────────────────────────────────────────────────────
 
+def parse_date_and_time(h3):
+    """
+    Parse date + time from the Add to Calendar text near an event h3.
+    Calendar links contain raw strings like: 04/29/2026 11:00
+    Returns (formatted_date, formatted_time) e.g. ("Wednesday, Apr 29, 2026", "11 a.m.")
+    """
+    for tag in h3.find_all_next(string=re.compile(r"\d{2}/\d{2}/\d{4}")):
+        m = re.search(r"(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2})", tag)
+        if m:
+            try:
+                dt = datetime.strptime(m.group(1), "%m/%d/%Y")
+                hour, minute = int(m.group(2)[:2]), int(m.group(2)[3:])
+                period = "a.m." if hour < 12 else "p.m."
+                hour12 = hour % 12 or 12
+                time_fmt = f"{hour12} {period}" if minute == 0 else f"{hour12}:{minute:02d} {period}"
+                date_fmt = dt.strftime("%A, %b %-d, %Y")
+                return date_fmt, time_fmt
+            except ValueError:
+                pass
+    return "", ""
+
+
 def get_kexp_events() -> list[dict]:
     """
     Scrapes the KEXP public events page directly.
@@ -70,20 +92,15 @@ def get_kexp_events() -> list[dict]:
         if event_url and not event_url.startswith("http"):
             event_url = "https://www.kexp.org" + event_url
 
-        # Look for the nearest preceding date heading
-        date_str = ""
-        for parent in h3.parents:
-            prev = parent.find_previous(["h2", "h4"])
-            if prev:
-                date_str = prev.get_text(strip=True)
-                break
+        # Parse date + time from nearby calendar text
+        date_str, time_str = parse_date_and_time(h3)
 
-        # Look for a time near the event (e.g. "11 a.m." or "3 p.m.")
-        time_str = ""
-        for tag in h3.find_all_previous(["h5", "p"], limit=5):
-            text = tag.get_text(strip=True)
-            if re.search(r"\d+\s*(a\.m\.|p\.m\.|am|pm)", text, re.IGNORECASE):
-                time_str = text
+        # Grab the artist photo from the nearest <img> before the h3
+        photo_url = ""
+        for img in h3.find_all_previous("img", limit=5):
+            src = img.get("src", "")
+            if "placeholder" not in src and src.startswith("http"):
+                photo_url = src
                 break
 
         details = f"{time_str} · KEXP Studio (Open to the Public)".strip(" ·")
@@ -93,6 +110,7 @@ def get_kexp_events() -> list[dict]:
             "date": date_str,
             "details": details,
             "url": event_url,
+            "photo": photo_url,
         })
 
     print(f"    → Found {len(events)} public events")
@@ -185,48 +203,56 @@ def find_matches(kexp_events: list[dict], spotify_artists: set[str]) -> list[dic
 
 # ── 4. Send email ──────────────────────────────────────────────────────────
 
-def build_email_html(matches: list[dict]) -> str:
-    rows = ""
-    for m in matches:
-        artist_cell = f'<a href="{m["url"]}" style="color:#1a1a1a; font-weight:600;">{m["artist"]}</a>' if m.get("url") else f'<strong>{m["artist"]}</strong>'
-        rows += f"""
-        <tr>
-          <td style="padding:12px 16px;">{artist_cell}</td>
-          <td style="padding:12px 16px; color:#555;">{m.get('date', '—')}</td>
-          <td style="padding:12px 16px; color:#555;">{m.get('details', '—')}</td>
-        </tr>
-        """
+def build_artist_card(m: dict) -> str:
+    if m.get("photo"):
+        photo_html = f'''<div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto 18px;background:#e8e8e8;">
+          <img src="{m["photo"]}" width="96" height="96" style="width:100%;height:100%;object-fit:cover;display:block;" alt="{m["artist"]}">
+        </div>'''
+    else:
+        photo_html = '<div style="width:96px;height:96px;border-radius:50%;background:#e8e8e8;margin:0 auto 18px;"></div>'
+
+    event_btn = ""
+    if m.get("url"):
+        event_btn = f'<a href="{m["url"]}" style="display:block;width:100%;padding:14px 20px;background:#1a1a1a;color:#fff;text-decoration:none;border-radius:8px;font-size:15px;font-weight:500;text-align:center;box-sizing:border-box;margin-bottom:10px;">View KEXP event</a>'
+
+    all_btn = '<a href="https://www.kexp.org/events/kexp-events/?category=public" style="display:block;width:100%;padding:14px 20px;background:#fff;color:#1a1a1a;text-decoration:none;border-radius:8px;font-size:15px;font-weight:500;text-align:center;box-sizing:border-box;border:1px solid #ddd;">View all KEXP events</a>'
 
     return f"""
-    <html><body style="font-family: 'Helvetica Neue', Arial, sans-serif; background:#f5f5f5; margin:0; padding:24px;">
-      <div style="max-width:620px; margin:0 auto; background:#fff; border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
-        <div style="background:#1c1c1c; padding:28px 32px;">
-          <p style="color:#e8e8e8; margin:0; font-size:11px; text-transform:uppercase; letter-spacing:2px;">KEXP × Spotify</p>
-          <h1 style="color:#fff; margin:8px 0 0; font-size:24px; font-weight:700;">
-            {len(matches)} artist{'s' if len(matches) != 1 else ''} you know {'are' if len(matches) != 1 else 'is'} playing KEXP
-          </h1>
-        </div>
-        <div style="padding:24px 32px;">
-          <table style="width:100%; border-collapse:collapse;">
-            <thead>
-              <tr style="border-bottom:2px solid #eee;">
-                <th style="padding:8px 16px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#999;">Artist</th>
-                <th style="padding:8px 16px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#999;">Date</th>
-                <th style="padding:8px 16px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#999;">Details</th>
-              </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-          </table>
-        </div>
-        <div style="padding:16px 32px 28px; border-top:1px solid #eee;">
-          <a href="https://www.kexp.org/events/" style="color:#1c1c1c; font-size:13px;">View all KEXP events →</a>
-        </div>
-        <div style="background:#f9f9f9; padding:14px 32px; font-size:11px; color:#aaa;">
-          Sent weekly by your KEXP Artist Alert · {datetime.now().strftime('%B %d, %Y')}
-        </div>
-      </div>
-    </body></html>
+    <div style="padding:32px 24px;border-bottom:1px solid #f0f0f0;text-align:center;">
+      {photo_html}
+      <p style="margin:0 0 8px;font-size:22px;font-weight:600;color:#1a1a1a;">{m["artist"]}</p>
+      <p style="margin:0 0 6px;font-size:16px;font-weight:500;color:#444;">{m.get("date","")}</p>
+      <p style="margin:0 0 24px;font-size:15px;color:#888;">{m.get("details","")}</p>
+      {event_btn}{all_btn}
+    </div>
     """
+
+
+def build_email_html(matches: list[dict]) -> str:
+    cards = "".join(build_artist_card(m) for m in matches)
+    count = len(matches)
+    noun = f"{count} artist{'s' if count != 1 else ''}"
+    verb = "are" if count != 1 else "is"
+
+    return f"""<!DOCTYPE html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{{margin:0;padding:16px;background:#f2f2f2;font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;}}
+  .wrap{{max-width:480px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;}}
+  .last-card{{border-bottom:none!important;}}
+</style>
+</head><body>
+<div class="wrap">
+  <div style="background:#1a1a1a;padding:28px 24px 24px;">
+    <p style="color:#888;margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:2px;">KEXP x Spotify</p>
+    <h1 style="color:#fff;margin:0;font-size:22px;font-weight:600;line-height:1.3;">{noun} you know {verb} playing KEXP</h1>
+  </div>
+  {cards}
+  <div style="padding:16px 24px;border-top:1px solid #f0f0f0;text-align:center;">
+    <p style="margin:0;font-size:12px;color:#aaa;">KEXP Artist Alert &middot; {datetime.now().strftime('%B %d, %Y')}</p>
+  </div>
+</div>
+</body></html>"""
 
 
 def send_email(matches: list[dict]):
@@ -241,7 +267,9 @@ def send_email(matches: list[dict]):
     plain = f"KEXP Artist Alert — {datetime.now().strftime('%B %d, %Y')}\n\n"
     for m in matches:
         plain += f"• {m['artist']}  |  {m.get('date','?')}  |  {m.get('details','')}\n"
-    plain += "\nhttps://www.kexp.org/events/"
+        if m.get("url"):
+            plain += f"  {m['url']}\n"
+    plain += f"\nhttps://www.kexp.org/events/kexp-events/?category=public"
 
     msg.attach(MIMEText(plain, "plain"))
     msg.attach(MIMEText(build_email_html(matches), "html"))
