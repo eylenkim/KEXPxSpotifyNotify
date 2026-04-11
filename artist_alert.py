@@ -122,20 +122,12 @@ def get_kexp_events() -> list[dict]:
 
 # ── 2. Get Spotify artists ─────────────────────────────────────────────────
 
-def get_spotify_client():
-    """Create and return an authenticated Spotify client."""
-    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET,
-        redirect_uri="http://127.0.0.1:8888/callback",
-        scope="user-follow-read user-top-read user-library-read",
-    ))
-    sp.auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
-    return sp
-
-
-def get_spotify_artists() -> set[str]:
-    """Returns a set of lowercase artist names from your Spotify library."""
+def get_spotify_artists() -> tuple[set[str], dict[str, str]]:
+    """
+    Returns:
+      - set of lowercase artist names from your library
+      - dict mapping lowercase name -> Spotify image URL (from real artist objects)
+    """
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET,
@@ -143,17 +135,23 @@ def get_spotify_artists() -> set[str]:
         scope="user-follow-read user-top-read user-library-read",
     ))
 
-    # Re-auth using stored refresh token (no browser needed in CI)
     sp.auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
 
     artist_names = set()
+    artist_images = {}  # lowercase name -> image URL
+
+    def store_artist(a: dict):
+        name = a["name"].lower().strip()
+        artist_names.add(name)
+        if name not in artist_images and a.get("images"):
+            artist_images[name] = a["images"][0]["url"]
 
     # Followed artists
     print("  Fetching followed artists …")
     results = sp.current_user_followed_artists(limit=50)
     while results:
         for a in results["artists"]["items"]:
-            artist_names.add(a["name"].lower().strip())
+            store_artist(a)
         results = sp.next(results["artists"]) if results["artists"]["next"] else None
 
     # Top artists (short, medium, long term)
@@ -161,25 +159,45 @@ def get_spotify_artists() -> set[str]:
     for term in ["short_term", "medium_term", "long_term"]:
         tops = sp.current_user_top_artists(limit=50, time_range=term)
         for a in tops["items"]:
-            artist_names.add(a["name"].lower().strip())
+            store_artist(a)
 
     # Artists from ALL saved tracks — full library scan
+    # Track objects only have artist id+name, not images — batch fetch full artist objects
     print("  Scanning full liked songs library …")
     offset = 0
+    track_artist_ids = {}  # id -> name, to batch-fetch later
     while True:
         tracks = sp.current_user_saved_tracks(limit=50, offset=offset)
         if not tracks["items"]:
             break
         for item in tracks["items"]:
             for a in item["track"]["artists"]:
-                artist_names.add(a["name"].lower().strip())
+                name = a["name"].lower().strip()
+                artist_names.add(name)
+                if name not in artist_images:
+                    track_artist_ids[a["id"]] = name
         offset += 50
         if not tracks["next"]:
             break
         print(f"    … {offset} tracks scanned so far")
 
-    print(f"  → {len(artist_names)} unique Spotify artists loaded")
-    return artist_names
+    # Batch fetch full artist objects (with images) in chunks of 50
+    print(f"  Fetching images for {len(track_artist_ids)} artists from saved tracks …")
+    ids = list(track_artist_ids.keys())
+    for i in range(0, len(ids), 50):
+        chunk = ids[i:i+50]
+        try:
+            full_artists = sp.artists(chunk)["artists"]
+            for a in full_artists:
+                if a and a.get("images"):
+                    name = a["name"].lower().strip()
+                    if name not in artist_images:
+                        artist_images[name] = a["images"][0]["url"]
+        except Exception as e:
+            print(f"    ⚠️  Image batch fetch error: {e}")
+
+    print(f"  → {len(artist_names)} unique artists, {len(artist_images)} with images")
+    return artist_names, artist_images
 
 
 # ── 3. Match ───────────────────────────────────────────────────────────────
@@ -193,16 +211,20 @@ def normalize(name: str) -> str:
     return name
 
 
-def find_matches(kexp_events: list[dict], spotify_artists: set[str], sp) -> list[dict]:
+def find_matches(kexp_events: list[dict], spotify_artists: set[str], artist_images: dict) -> list[dict]:
     spotify_normalized = {normalize(a): a for a in spotify_artists}
     matches = []
 
     for event in kexp_events:
         kexp_norm = normalize(event["artist"])
         if kexp_norm in spotify_normalized:
+            matched_name = spotify_normalized[kexp_norm]
+            # Use the image keyed by the exact Spotify artist name
+            photo = artist_images.get(matched_name.lower().strip(), "")
             matches.append({
                 **event,
-                "spotify_name": spotify_normalized[kexp_norm],
+                "spotify_name": matched_name,
+                "photo": photo,
             })
 
     # Deduplicate by artist
@@ -213,32 +235,14 @@ def find_matches(kexp_events: list[dict], spotify_artists: set[str], sp) -> list
             seen.add(m["artist"].lower())
             unique.append(m)
 
-    # Fetch Spotify artist images for each match
-    print("  Fetching artist images from Spotify …")
     for m in unique:
-        img = get_spotify_artist_image(sp, m["artist"])
-        if img:
-            m["photo"] = img
-            print(f"    → Got image for {m['artist']}")
-        else:
-            print(f"    → No image found for {m['artist']}")
+        status = "✅ has image" if m.get("photo") else "⚠️  no image"
+        print(f"    {m['artist']} — {status}")
 
     return unique
 
 
 # ── 4. Send email ──────────────────────────────────────────────────────────
-
-def get_spotify_artist_image(sp, artist_name: str) -> str:
-    """Look up artist on Spotify and return their image URL."""
-    try:
-        results = sp.search(q=artist_name, type="artist", limit=1)
-        items = results["artists"]["items"]
-        if items and items[0]["images"]:
-            return items[0]["images"][0]["url"]
-    except Exception:
-        pass
-    return ""
-
 
 def build_artist_card(m: dict) -> str:
     if m.get("photo"):
@@ -331,11 +335,10 @@ def main():
         return
 
     print(f"\n🎧 Loading Spotify library …")
-    spotify_artists = get_spotify_artists()
+    spotify_artists, artist_images = get_spotify_artists()
 
     print(f"\n🔍 Matching …")
-    sp = get_spotify_client()
-    matches = find_matches(kexp_events, spotify_artists, sp)
+    matches = find_matches(kexp_events, spotify_artists, artist_images)
     print(f"  → {len(matches)} match{'es' if len(matches) != 1 else ''} found")
 
     if not matches:
